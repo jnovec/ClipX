@@ -15,6 +15,7 @@ final class ClipItem: NSObject {
     let createdAt: Date
     let text: String?
     let image: NSImage?
+    var classification: String?
 
     init(text: String, kind: ClipKind = .text, createdAt: Date = Date()) {
         self.text = text
@@ -239,11 +240,21 @@ final class ClipXWindowController: NSWindowController, NSSearchFieldDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
+
+    func updateItemClassification(item: ClipItem, classification: String) {
+        for subview in stackView.arrangedSubviews {
+            if let card = subview as? ClipCardView, card.item === item {
+                card.updateClassification(classification)
+                break
+            }
+        }
+    }
 }
 
 final class ClipCardView: NSView {
     let item: ClipItem
     var onClick: ((ClipItem) -> Void)?
+    private let classificationLabel = NSTextField(labelWithString: "")
 
     init(item: ClipItem) {
         self.item = item
@@ -267,6 +278,15 @@ final class ClipCardView: NSView {
         header.textColor = .white
         header.translatesAutoresizingMaskIntoConstraints = false
 
+        classificationLabel.font = .systemFont(ofSize: 10, weight: .bold)
+        classificationLabel.textColor = .white
+        classificationLabel.alignment = .center
+        classificationLabel.wantsLayer = true
+        classificationLabel.layer?.cornerRadius = 6
+        classificationLabel.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.6).cgColor
+        classificationLabel.translatesAutoresizingMaskIntoConstraints = false
+        classificationLabel.isHidden = true
+
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
         let when = NSTextField(labelWithString: formatter.localizedString(for: item.createdAt, relativeTo: Date()))
@@ -275,11 +295,18 @@ final class ClipCardView: NSView {
         when.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(header)
+        addSubview(classificationLabel)
         addSubview(when)
 
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             header.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+
+            classificationLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            classificationLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            classificationLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 50),
+            classificationLabel.heightAnchor.constraint(equalToConstant: 16),
+
             when.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             when.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 1)
         ])
@@ -334,6 +361,18 @@ final class ClipCardView: NSView {
         NSCursor.pop()
         layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
     }
+
+    func updateClassification(_ classification: String) {
+        classificationLabel.stringValue = classification.uppercased()
+        classificationLabel.isHidden = false
+
+        // Simple animation: fade in
+        classificationLabel.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            classificationLabel.animator().alphaValue = 1.0
+        }
+    }
 }
 
 // MARK: - App
@@ -341,12 +380,15 @@ final class ClipCardView: NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let keychainService = "online.novec.clipx.pastesio"
     private let keychainAccount = "api-key"
+    private let aiKeychainService = "online.novec.clipx.ai"
+    private let aiKeychainAccount = "api-key"
 
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var enabled = true
     private var apiKey = ""
+    private var aiApiKey = ""
     private var lastPasteURL: URL?
     private var history: [ClipItem] = []
     private let maxHistory = 50
@@ -354,7 +396,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var suppressNextClipboardEvent = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        apiKey = loadKeychain() ?? ""
+        apiKey = loadKeychain(service: keychainService, account: keychainAccount) ?? ""
+        aiApiKey = loadKeychain(service: aiKeychainService, account: aiKeychainAccount) ?? ""
 
         windowController = ClipXWindowController()
         windowController.onSelect = { [weak self] item in
@@ -424,6 +467,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         key.target = self
         menu.addItem(key)
 
+        let aiKeyTitle = aiApiKey.isEmpty ? "Set AI Classification key…" : "Change AI Classification key…"
+        let aiKey = NSMenuItem(title: aiKeyTitle, action: #selector(setAIKey), keyEquivalent: "")
+        aiKey.target = self
+        menu.addItem(aiKey)
+
         let clear = NSMenuItem(title: "Clear local history", action: #selector(clearHistory), keyEquivalent: "")
         clear.target = self
         menu.addItem(clear)
@@ -448,6 +496,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func setAPIKey() { promptForAPIKey(firstLaunch: false) }
 
+    @objc private func setAIKey() { promptForAIKey() }
+
     private func promptForAPIKey(firstLaunch: Bool) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -464,8 +514,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { return }
-            if saveKeychain(value) {
+            if saveKeychain(value, service: keychainService, account: keychainAccount) {
                 apiKey = value
+                buildMenu()
+            }
+        }
+    }
+
+    private func promptForAIKey() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "AI Classification Key"
+        alert.informativeText = "Enter your Anthropic API key to enable AI classification of your clipboard content. The key is stored securely in macOS Keychain."
+
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 390, height: 24))
+        field.placeholderString = "Anthropic API key"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            if saveKeychain(value, service: aiKeychainService, account: aiKeychainAccount) {
+                aiApiKey = value
                 buildMenu()
             }
         }
@@ -507,6 +580,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         history.insert(item, at: 0)
         if history.count > maxHistory { history.removeLast(history.count - maxHistory) }
         windowController.update(items: history)
+        windowController.showAndActivate()
+
+        if let text = item.text {
+            classifyText(text, item: item)
+        }
     }
 
     private func restoreToClipboard(_ item: ClipItem) {
@@ -557,6 +635,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
+    private func classifyText(_ text: String, item: ClipItem) {
+        guard !aiApiKey.isEmpty else { return }
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else { return }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("anthropic-version", forHTTPHeaderField: "2023-06-01")
+        req.setValue("x-api-key \(aiApiKey)", forHTTPHeaderField: "x-api-key") // Fixed header format
+
+        // Correcting header for Anthropic: x-api-key is just the key
+        req.setValue(aiApiKey, forHTTPHeaderField: "x-api-key")
+
+        let prompt = "You are a clipboard classification assistant. Classify the following text into exactly one of these categories: Code, Task, Note, Quote, Link, Other. Return only the category name and nothing else.\n\nText: \(text)"
+        let body: [String: Any] = [
+            "model": "claude-3-haiku-20240307",
+            "max_tokens": 10,
+            "messages": [
+                ["role": "user", "content": prompt]
+            ]
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            guard let data = data, error == nil else { return }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let content = json["content"] as? [[String: Any]],
+               let text = content.first?["text"] as? String {
+
+                let classification = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    item.classification = classification
+                    self?.windowController.updateItemClassification(item: item, classification: classification)
+                }
+            }
+        }.resume()
+    }
+
     private static func findPasteURL(in object: [String: Any]) -> URL? {
         for key in ["paste_url", "url", "link"] {
             if let value = object[key] as? String, let url = URL(string: value), url.scheme != nil { return url }
@@ -569,12 +686,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Keychain
 
-    private func saveKeychain(_ value: String) -> Bool {
+    private func saveKeychain(_ value: String, service: String, account: String) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
         ]
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
@@ -587,11 +704,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    private func loadKeychain() -> String? {
+    private func loadKeychain(service: String, account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
